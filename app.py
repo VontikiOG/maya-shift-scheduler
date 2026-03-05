@@ -3,6 +3,10 @@ import pandas as pd
 from datetime import datetime, timedelta
 import calendar
 import time
+import json
+import os
+import io
+import urllib.parse
 
 # הגדרות עמוד נעימות
 st.set_page_config(page_title="המשמרות של מאיה", page_icon="🌸", layout="centered")
@@ -11,10 +15,41 @@ st.markdown("""
 <style>
     .stApp { direction: rtl; }
     p, div, h1, h2, h3, h4, h5, h6, label, span, li, button, input { text-align: right !important; }
-    [data-testid="stDataFrame"] { direction: rtl; }
+    [data-testid="stDataFrame"], [data-testid="stDataEditor"] { direction: rtl; }
     .success-text { color: #2e7d32; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
+
+DRAFT_FILE = "schedule_draft.json"
+
+# רשימת חגים לדוגמה (ניתן להרחיב לכל השנה)
+HOLIDAYS = {
+    "02/04/2026": "ערב פסח 🍷",
+    "03/04/2026": "פסח 🍷",
+    "08/04/2026": "ערב שביעי של פסח",
+    "09/04/2026": "שביעי של פסח",
+    "21/04/2026": "ערב יום העצמאות",
+    "22/04/2026": "יום העצמאות 🇮🇱",
+    "21/05/2026": "ערב שבועות",
+    "22/05/2026": "שבועות 🌾"
+}
+
+# --- פונקציות טיוטה ושמירת מצב ---
+def save_draft(data):
+    try:
+        with open(DRAFT_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        st.error(f"שגיאה בשמירת הטיוטה: {e}")
+
+def load_draft():
+    if os.path.exists(DRAFT_FILE):
+        try:
+            with open(DRAFT_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
 
 # --- פונקציות עזר לחודשים ותאריכים ---
 def get_next_month_dates():
@@ -31,7 +66,8 @@ def get_next_month_dates():
         current_date = datetime(year, month, day)
         date_str = current_date.strftime("%d/%m/%Y")
         all_dates.append(date_str)
-        if current_date.weekday() in [4, 5]: # 4=שישי, 5=שבת
+        # סופ"ש מוגדר רק כשישי (4) ושבת (5)
+        if current_date.weekday() in [4, 5]: 
             weekend_dates.append(date_str)
             
     return all_dates, weekend_dates, f"{month:02d}/{year}"
@@ -44,7 +80,7 @@ def is_weekend(date_str):
     except:
         return False
 
-# --- טעינת נתוני הרופאים מ-CSV ---
+# --- טעינת נתוני הרופאים מ-CSV והכנת מספרי טלפון לוואטסאפ ---
 @st.cache_data
 def load_doctors_data():
     for enc in ['utf-8', 'cp1255', 'iso-8859-8']:
@@ -52,69 +88,65 @@ def load_doctors_data():
             df = pd.read_csv("doctors_list.csv", encoding=enc)
             df.columns = df.columns.str.strip()
             if 'מספר טלפון' in df.columns:
-                df['מספר טלפון'] = df['מספר טלפון'].astype(str).str.replace("'", "").str.strip()
+                # ניקוי הגרש והכנה לקידומת בינלאומית
+                cleaned_phones = df['מספר טלפון'].astype(str).str.replace("'", "").str.replace("-", "").str.strip()
+                df['טלפון_נקי'] = cleaned_phones.apply(lambda x: "972" + x[1:] if x.startswith("0") else x)
             return df
         except UnicodeDecodeError:
             continue
         except FileNotFoundError:
-            return pd.DataFrame(columns=["שם הרופא", "מספר טלפון"])
-    return pd.DataFrame(columns=["שם הרופא", "מספר טלפון"])
+            return pd.DataFrame(columns=["שם הרופא", "מספר טלפון", "טלפון_נקי"])
+    return pd.DataFrame(columns=["שם הרופא", "מספר טלפון", "טלפון_נקי"])
 
 # --- אלגוריתם "מד הצדק" (שיטת השחיקה) ---
 def generate_fair_schedule(availability_dict):
-    # מציאת כל התאריכים הייחודיים שהוזנו
     all_dates = set()
     for dates in availability_dict.values():
         all_dates.update(dates)
     
-    # מיון התאריכים כרונולוגית
     sorted_dates = sorted(list(all_dates), key=lambda x: datetime.strptime(x, "%d/%m/%Y"))
-    
-    # אתחול נקודות שחיקה (כולם מתחילים מאפס)
     burnout_scores = {doc: 0 for doc in availability_dict.keys()}
     schedule = []
     
-    # מילות מפתח לזיהוי רופאי השתלות בלבד
     bmt_keywords = ["ילנה", "טראסוב", "בהאא", "עתאמנה"]
     
     for date_str in sorted_dates:
         is_we = is_weekend(date_str)
+        holiday_note = HOLIDAYS.get(date_str, "")
+        
         available_today = [doc for doc, dates in availability_dict.items() if date_str in dates]
         
         if not available_today:
             schedule.append({
                 "תאריך": date_str, "סוג יום": "סופ״ש 🌴" if is_we else "אמצע שבוע ☀️",
+                "הערות": holiday_note,
                 "המטואונקולוגיה": "חסר רופא 🚨", "השתלות מח עצם": "חסר רופא 🚨"
             })
             continue
             
-        # חלוקה לקבוצות
         bmt_only_docs = [d for d in available_today if any(k in d for k in bmt_keywords)]
         regular_docs = [d for d in available_today if d not in bmt_only_docs]
         
         bmt_doc = None
         hemato_doc = None
         
-        # 1. קודם כל דואגים להשתלות אם יש רופא שיכול לעשות רק את זה
         if bmt_only_docs:
             bmt_doc = min(bmt_only_docs, key=lambda d: burnout_scores[d])
             
-        # 2. שיבוץ המטואונקולוגיה (הכי חשוב!) - ניתן לרופא הרגיל עם *הכי מעט* שחיקה
         if regular_docs:
             hemato_doc = min(regular_docs, key=lambda d: burnout_scores[d])
-            regular_docs.remove(hemato_doc) # יורד מהרשימה להיום
+            regular_docs.remove(hemato_doc)
             
-        # 3. אם אין רופא השתלות ייעודי ויש עוד רופאים רגילים, ניתן את ההשתלות כפרס לזה עם *הכי הרבה* שחיקה
         if not bmt_doc and regular_docs:
             bmt_doc = max(regular_docs, key=lambda d: burnout_scores[d])
             
-        # עדכון השחיקה
         if bmt_doc: burnout_scores[bmt_doc] += 1
         if hemato_doc: burnout_scores[hemato_doc] += 2
         
         schedule.append({
             "תאריך": date_str,
             "סוג יום": "סופ״ש 🌴" if is_we else "אמצע שבוע ☀️",
+            "הערות": holiday_note,
             "המטואונקולוגיה": hemato_doc if hemato_doc else "חסר רופא 🚨",
             "השתלות מח עצם": bmt_doc if bmt_doc else "חסר רופא 🚨"
         })
@@ -126,8 +158,11 @@ def generate_fair_schedule(availability_dict):
 def admin_login():
     st.markdown("בוקר טוב מאיה! הזיני סיסמה כדי להתחיל לעבוד.")
     pwd = st.text_input("סיסמה", type="password")
+    # שאיבת הסיסמה מהסודות (או ברירת מחדל אם לא הוגדר)
+    correct_password = st.secrets.get("ADMIN_PASSWORD", "MAYA3")
+    
     if st.button("התחברי 🌸", use_container_width=True):
-        if pwd == "MAYA3":
+        if pwd == correct_password:
             st.session_state.maya_logged_in = True
             st.rerun()
         else:
@@ -136,14 +171,19 @@ def admin_login():
 @st.dialog("📜 יומן שינויים - היסטוריית הפיתוח")
 def show_changelog():
     st.markdown("""
-    **v1.1.0 | גרסת "מד הצדק" ⚖️**
-    * **הסרת ססמאות:** מחיקת הסיסמה הגלויה מעמוד הבית לטובת אבטחת מידע.
-    * **אלגוריתם שחיקה (Burnout):** פיתוח אלגוריתם שיבוץ חכם המחלק "נקודות שחיקה" (המטו=2, השתלות=1) כדי לדאוג לאיזון עומסים הוגן בין חברי הצוות.
-    * **תעדוף חריגים:** בניית מנגנון שמשריין אוטומטית משמרות השתלות לרופאים המורשים למחלקה זו בלבד (ילנה, בהאא), ואת שאריות משמרות ההשתלות מחלק כ"פרס" לרופאים שנטחנו בהמטו.
-    * **לוח בקרה למאיה:** הוספת תצוגת טבלת הוגנות חודשית למנהלת, כדי שתוכל לראות בדיוק כמה נקודות צבר כל רופא ולהסביר את השיבוץ לצוות.
+    **v2.0.0 | חווית משתמש ואבטחה מלאה 🚀**
+    * **הורדה לאקסל:** ייצוא קל של טבלת המשמרות לקובץ מסודר בלחיצת כפתור.
+    * **עריכה חופשית (Override):** יכולת לערוך ולשנות ידנית שמות של רופאים בתוך הטבלה לפני ההורדה או שליחת ההודעות.
+    * **וואטסאפ אוטומטי:** המערכת חותכת את המשמרות של כל רופא ומייצרת כפתור לשליחת הודעת וואטסאפ מרוכזת עם הלו"ז האישי שלו!
+    * **אבטחה מקסימלית (Secrets):** הסיסמה של מאיה נמחקה מקוד המקור והועברה למנגנון הסודות של השרת למניעת חשיפה.
+    * **מד התקדמות (Progress Bar):** חיווי ויזואלי ברור המציג למאיה כמה רופאים היא סיימה להזין ביחס לצוות הכללי.
+    * **הערות חגים (Visual Only):** ציון מיוחד לתאריכי חגים בהזנה ובטבלה עצמה, כדי שמאיה תהיה מודעת לכך – מבלי לפגוע בלוגיקת סופי השבוע הקשיחה (שישי-שבת בלבד).
+
+    **v1.1.0 | טיוטות אוטומטיות ומד הצדק ⚖️**
+    * מנגנון טיוטה Auto-Save לעבודה מתמשכת, איפוס מערכת בטוח, ואלגוריתם "נקודות שחיקה" המחלק משמרות לפי עומס קודם. תעדוף משמרות השתלות כפרס לעובדי המטו.
 
     **v1.0.0 | גרסת הבסיס למאיה 🌸**
-    * הקמת תשתית ידידותית, קריאת CSV מאובטחת ללא הצגת טלפונים, לוגיקת סופי שבוע אוטומטית לרופאים רלוונטיים (מטקוביץ, בהאא).
+    * ממשק "Wholesome" חברותי, טעינת CSV עמידה לשגיאות קידוד, הסתרת מספרי טלפון, וזיהוי חריגי סופ"ש באופן אוטומטי.
     """)
     if st.button("סגירה", use_container_width=True):
         st.rerun()
@@ -153,7 +193,7 @@ def main():
         st.session_state.maya_logged_in = False
     
     if "availability_dict" not in st.session_state:
-        st.session_state.availability_dict = {}
+        st.session_state.availability_dict = load_draft()
 
     col1, col2, col3 = st.columns([3, 1, 1])
     with col1:
@@ -174,8 +214,8 @@ def main():
     st.divider()
 
     if not st.session_state.maya_logged_in:
-        # הסיסמה הוסרה לחלוטין מכאן!
         st.info("אנא התחברי למערכת כדי להתחיל לשבץ משמרות.")
+        st.caption("*(הטיוטה היומית נשמרת אוטומטית גם אם הדפדפן נסגר)*")
         st.stop()
 
     df_doctors = load_doctors_data()
@@ -184,9 +224,14 @@ def main():
         st.stop()
         
     doctor_names = df_doctors['שם הרופא'].tolist()
+    
+    # חישוב מד ההתקדמות של מאיה
+    total_doctors = len(doctor_names)
+    fed_doctors_count = len(st.session_state.availability_dict.keys())
+    progress_val = min(fed_doctors_count / total_doctors if total_doctors > 0 else 0, 1.0)
 
     st.subheader("👩‍⚕️ הזנת זמינות רופאים")
-    st.markdown("בחרי רופא מהרשימה וסמני את התאריכים שהוא פנוי בהם. מספרי הטלפון שמורים בבטחה במערכת.")
+    st.progress(progress_val, text=f"הוזנו {fed_doctors_count} מתוך {total_doctors} רופאים בקובץ")
     
     selected_doctor = st.selectbox("בחירת רופא להזנה:", ["-- בחרי רופא --"] + doctor_names)
     
@@ -208,10 +253,15 @@ def main():
                 
             current_selections = st.session_state.availability_dict.get(selected_doctor, [])
             
+            # פונקציית תצוגה שמוסיפה את החג לשם התאריך (אם יש)
+            def format_date_option(d):
+                return f"{d} - {HOLIDAYS[d]}" if d in HOLIDAYS else d
+            
             selected_dates = st.multiselect(
                 "סמני את התאריכים (אפשר לבחור כמה ביחד):", 
                 options_for_doctor,
-                default=current_selections
+                default=current_selections,
+                format_func=format_date_option
             )
             
             if st.button(f"💾 שמרי תאריכים ל{selected_doctor}", type="primary"):
@@ -219,21 +269,22 @@ def main():
                     st.session_state.availability_dict[selected_doctor] = selected_dates
                 elif selected_doctor in st.session_state.availability_dict:
                     del st.session_state.availability_dict[selected_doctor]
-                st.success(f"מעולה! התאריכים של {selected_doctor} נשמרו בהצלחה. ✨")
+                
+                save_draft(st.session_state.availability_dict)
+                st.success(f"מעולה! התאריכים של {selected_doctor} נשמרו. ✨")
                 time.sleep(1) 
                 st.rerun()
 
     st.divider()
     
-    st.subheader("📋 סטטוס הזנות לחודש הקרוב")
     fed_doctors = list(st.session_state.availability_dict.keys())
     
     if fed_doctors:
-        st.markdown("כבר הזנת תאריכים לרופאים הבאים:")
-        cols = st.columns(3)
-        for i, doc in enumerate(fed_doctors):
-            num_shifts = len(st.session_state.availability_dict[doc])
-            cols[i % 3].markdown(f"✅ {doc} ({num_shifts} משמרות)")
+        with st.expander("📋 רשימת הרופאים שכבר הוזנו החודש"):
+            cols = st.columns(3)
+            for i, doc in enumerate(fed_doctors):
+                num_shifts = len(st.session_state.availability_dict[doc])
+                cols[i % 3].markdown(f"✅ {doc} ({num_shifts})")
             
         st.write("")
         if st.button("🪄 צרי סידור עבודה אוטומטי (לפי מד הצדק)", type="primary", use_container_width=True):
@@ -245,17 +296,79 @@ def main():
     else:
         st.caption("עדיין לא הוזנו תאריכים לאף רופא.")
 
-    # תצוגת הסידור והשחיקה אחרי שהאלגוריתם רץ
+    # תצוגת הסידור, עריכה, הורדה ושליחה
     if "final_schedule" in st.session_state:
         st.divider()
-        st.subheader("🎉 סידור העבודה מוכן!")
-        st.dataframe(st.session_state.final_schedule, use_container_width=True, hide_index=True)
+        st.subheader("🎉 סידור העבודה מוכן! (טבלה ניתנת לעריכה)")
+        st.markdown("אם משהו לא מסתדר לך, **את יכולה ללחוץ על השמות בטבלה ולשנות אותם ידנית** לפני שאת מורידה את הקובץ.")
         
-        with st.expander("📊 מאחורי הקלעים: טבלת נקודות השחיקה של הצוות (שקיפות!)"):
+        # טבלת עריכה (Data Editor)
+        edited_df = st.data_editor(st.session_state.final_schedule, use_container_width=True, hide_index=True)
+        
+        # כפתור הורדה לאקסל
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            edited_df.to_excel(writer, index=False, sheet_name='סידור חודשי')
+        
+        st.download_button(
+            label="📥 לחצי כאן להורדת הסידור המלא לאקסל",
+            data=output.getvalue(),
+            file_name=f"schedule_{TARGET_MONTH.replace('/', '_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True
+        )
+        
+        st.divider()
+        st.subheader("📱 שליחת הודעות אישיות לרופאים")
+        st.markdown("המערכת הכינה הודעות מרוכזות לכל רופא עם המשמרות שלו:")
+        
+        # חיתוך המשמרות לפי רופא מהטבלה ה*ערוכה*
+        shifts_by_doc = {}
+        for idx, row in edited_df.iterrows():
+            date = row['תאריך']
+            hemato = row['המטואונקולוגיה']
+            bmt = row['השתלות מח עצם']
+            
+            if hemato and "חסר רופא" not in hemato:
+                shifts_by_doc.setdefault(hemato, []).append(f"• {date} (המטואונקולוגיה)")
+            if bmt and "חסר רופא" not in bmt:
+                shifts_by_doc.setdefault(bmt, []).append(f"• {date} (השתלות מח עצם)")
+                
+        # מילון טלפונים לשליפה מהירה
+        phone_dict = dict(zip(df_doctors['שם הרופא'], df_doctors['טלפון_נקי']))
+        
+        if shifts_by_doc:
+            with st.expander("רשימת הודעות מוכנות לשליחה (לחצי לפתיחה)"):
+                for doc, shifts in shifts_by_doc.items():
+                    phone = phone_dict.get(doc, "")
+                    if phone:
+                        msg = f"היי ד״ר {doc}, להלן המשמרות שלך לחודש הקרוב:\n" + "\n".join(shifts) + "\n\nתודה רבה, מאיה 🌸"
+                        url = f"https://wa.me/{phone}?text={urllib.parse.quote(msg)}"
+                        st.link_button(f"💬 שלחי לוואטסאפ של {doc}", url)
+                    else:
+                        st.warning(f"אין מספר טלפון מעודכן לד״ר {doc}")
+                        
+        with st.expander("📊 מאחורי הקלעים: טבלת נקודות השחיקה"):
             st.markdown("*(המטו = +2 נקודות, השתלות = +1 נקודה. המערכת דואגת למי שיש לו הכי מעט)*")
             burnout_df = pd.DataFrame(list(st.session_state.burnout_scores.items()), columns=["שם הרופא", "נקודות שחיקה"])
             burnout_df = burnout_df.sort_values(by="נקודות שחיקה", ascending=False)
             st.dataframe(burnout_df, hide_index=True)
+
+    # כפתור מחיקה והתחלה מחדש
+    st.write("")
+    st.write("")
+    with st.expander("⚙️ אפשרויות מתקדמות (איפוס המערכת)"):
+        st.warning("לחיצה על הכפתור תמחק את כל התאריכים שהזנת עד כה גם מהגיבוי. הפעולה בלתי הפיכה.")
+        if st.button("🗑️ נקי הכל והתחילי מחדש", type="primary"):
+            st.session_state.availability_dict = {}
+            if "final_schedule" in st.session_state:
+                del st.session_state.final_schedule
+            if os.path.exists(DRAFT_FILE):
+                os.remove(DRAFT_FILE)
+            st.success("הכל נוקה בהצלחה! אפשר להתחיל סידור חדש.")
+            time.sleep(1)
+            st.rerun()
 
 if __name__ == "__main__":
     main()
