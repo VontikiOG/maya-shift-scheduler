@@ -153,18 +153,20 @@ def generate_fair_schedule(availability_dict):
         
     return pd.DataFrame(schedule), burnout_scores
 
-# --- אזור ניהול ויומן שינויים ---
 @st.dialog("🔒 כניסת מנהלת")
 def admin_login():
     st.markdown("בוקר טוב מאיה! הזיני סיסמה כדי להתחיל לעבוד.")
     pwd = st.text_input("סיסמה", type="password")
-    # שאיבת הסיסמה מהסודות (או ברירת מחדל אם לא הוגדר)
-    correct_password = st.secrets.get("ADMIN_PASSWORD", "MAYA3")
+    
+    # שאיבת הסיסמה אך ורק מהכספת! אין שום זכר לסיסמה האמיתית בקוד.
+    correct_password = st.secrets.get("ADMIN_PASSWORD", "PASSWORD_NOT_SET")
     
     if st.button("התחברי 🌸", use_container_width=True):
-        if pwd == correct_password:
+        if pwd == correct_password and correct_password != "PASSWORD_NOT_SET":
             st.session_state.maya_logged_in = True
             st.rerun()
+        elif correct_password == "PASSWORD_NOT_SET":
+            st.error("🚨 שגיאת מערכת: מנהל המערכת טרם הגדיר סיסמה בשרת (Secrets).")
         else:
             st.error("סיסמה שגויה, נסי שוב מאיה! 😊")
 
