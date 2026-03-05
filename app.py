@@ -19,7 +19,7 @@ st.markdown("""
 # --- פונקציות עזר לחודשים ותאריכים ---
 def get_next_month_dates():
     today = datetime.today()
-    # חישוב החודש הבא (קפיצה קטנה קדימה כדי למצוא את החודש הבא בוודאות)
+    # חישוב החודש הבא
     next_month = today.replace(day=28) + timedelta(days=4) 
     year = next_month.year
     month = next_month.month
@@ -42,21 +42,25 @@ ALL_DATES, WEEKEND_DATES, TARGET_MONTH = get_next_month_dates()
 # --- טעינת נתוני הרופאים מ-CSV ---
 @st.cache_data
 def load_doctors_data():
-    try:
-        df = pd.read_csv("doctors_list.csv")
-        # ניקוי העמודות למקרה שיש רווחים נסתרים
-        df.columns = df.columns.str.strip()
-        
-        # ניקוי מספרי הטלפון מהגרש (') שיש בקובץ
-        if 'מספר טלפון' in df.columns:
-            df['מספר טלפון'] = df['מספר טלפון'].astype(str).str.replace("'", "").str.strip()
+    # מנסה לקרוא את הקובץ בכמה סוגי קידודים נפוצים לעברית
+    for enc in ['utf-8', 'cp1255', 'iso-8859-8']:
+        try:
+            df = pd.read_csv("doctors_list.csv", encoding=enc)
+            df.columns = df.columns.str.strip()
+            # ניקוי מספרי הטלפון מהגרש
+            if 'מספר טלפון' in df.columns:
+                df['מספר טלפון'] = df['מספר טלפון'].astype(str).str.replace("'", "").str.strip()
+            return df
+        except UnicodeDecodeError:
+            continue
+        except FileNotFoundError:
+            st.error("🚨 קובץ 'doctors_list.csv' לא נמצא בשרת! נא להעלות אותו לתיקייה.")
+            return pd.DataFrame(columns=["שם הרופא", "מספר טלפון"])
             
-        return df
-    except FileNotFoundError:
-        st.error("🚨 קובץ 'doctors_list.csv' לא נמצא בשרת! נא להעלות אותו לתיקייה.")
-        return pd.DataFrame(columns=["שם הרופא", "מספר טלפון"])
+    st.error("שגיאת קידוד: לא ניתן לפענח את קובץ הרופאים. נא לוודא שהוא שמור כ-CSV תקין.")
+    return pd.DataFrame(columns=["שם הרופא", "מספר טלפון"])
 
-# --- אזור ניהול ---
+# --- אזור ניהול ויומן שינויים ---
 @st.dialog("🔒 כניסת מנהלת")
 def admin_login():
     st.markdown("בוקר טוב מאיה! הזיני סיסמה כדי להתחיל לעבוד.")
@@ -68,6 +72,22 @@ def admin_login():
         else:
             st.error("סיסמה שגויה, נסי שוב מאיה! 😊")
 
+@st.dialog("📜 יומן שינויים - היסטוריית הפיתוח")
+def show_changelog():
+    st.markdown("""
+    **v1.0.0 | גרסת הבסיס למאיה 🌸**
+    * **הקמת תשתית:** בניית ממשק ייעודי מותאם אישית למאיה, נקי מסרקזם ובעל אווירה ידידותית, חיובית ונוחה לשימוש יומיומי.
+    * **מערכת התחברות מאובטחת:** הוספת חלון קופץ (Dialog) לכניסת מנהלת עם הסיסמה הייעודית, למניעת גישה לא מורשית למערכת השיבוצים.
+    * **קריאת נתונים חכמה ועמידה:** ייבוא אוטומטי של קובץ `doctors_list.csv` תוך טיפול מובנה בבעיות קידוד נפוצות של אקסל בעברית (תמיכה ב-cp1255, utf-8, iso-8859-8) כדי למנוע קריסות בקריאת שמות הרופאים.
+    * **הגנה על פרטיות מידע רגיש:** קליטת מספרי הטלפון של הרופאים מהקובץ, ניקוי תווי שגיאה (כמו גרשיים), ושמירתם בזיכרון השרת בלבד. מספרי הטלפון חסומים להצגה בממשק המשתמש (UI).
+    * **לוגיקת בחירת תאריכים ממוקדת:** מעבר לממשק "תיק אישי" נקי לכל רופא, המאפשר בחירת תאריכי זמינות חודשיים בצורה קלה מבלי להעמיס נתונים על המסך.
+    * **זיהוי חריגים אוטומטי (Fuzzy Logic):** הטמעת זיהוי חכם מבוסס טקסט לשמות רופאים עם אילוצים מיוחדים (כגון: בהאא, עתאמנה, מטקוביץ, טראסוב), גם אם השם הוקלד בצורה שונה.
+    * **הגבלת ימי עבודה למניעת טעויות אנוש:** חסימה מוחלטת של האפשרות לבחור ימי חול עבור רופאים שעובדים רק בסופי שבוע. המערכת מסננת ומציגה להזנה ימי שישי ושבת בלבד.
+    * **ניהול מצב (State Management):** הוספת מערכת מעקב פנימית (`availability_dict`) ששומרת אילו רופאים כבר הוזנו ומציגה חיווי ויזואלי מהיר (✅) למעקב התקדמות העבודה.
+    """)
+    if st.button("סגירה", use_container_width=True):
+        st.rerun()
+
 def main():
     if "maya_logged_in" not in st.session_state:
         st.session_state.maya_logged_in = False
@@ -76,16 +96,19 @@ def main():
     if "availability_dict" not in st.session_state:
         st.session_state.availability_dict = {}
 
-    col1, col2 = st.columns([4, 1])
+    col1, col2, col3 = st.columns([3, 1, 1])
     with col1:
         st.title("מערכת השיבוצים של מאיה 🌸")
         st.markdown(f"**מכינים את סידור העבודה לחודש: {TARGET_MONTH}**")
     with col2:
+        if st.button("מה התחדש?", type="tertiary", use_container_width=True):
+            show_changelog()
+    with col3:
         if not st.session_state.maya_logged_in:
-            if st.button("כניסת מנהלת ⚙️"):
+            if st.button("כניסת מנהלת ⚙️", use_container_width=True):
                 admin_login()
         else:
-            if st.button("התנתקי 👋"):
+            if st.button("התנתקי 👋", use_container_width=True):
                 st.session_state.maya_logged_in = False
                 st.rerun()
 
@@ -95,7 +118,7 @@ def main():
         st.info("אנא התחברי למערכת כדי להתחיל לשבץ משמרות (סיסמה: MAYA3).")
         st.stop()
 
-    # טעינת רשימת הרופאים מקובץ ה-CSV שהעלית
+    # טעינת רשימת הרופאים
     df_doctors = load_doctors_data()
     if df_doctors.empty:
         st.stop()
@@ -124,10 +147,8 @@ def main():
             if is_bmt_only:
                 st.caption("*(לידיעתך: רופא זה מוגדר למחלקת השתלות מח עצם בלבד)*")
                 
-            # שליפת נתונים קיימים אם מאיה כבר הזינה בעבר במהלך הסשן
             current_selections = st.session_state.availability_dict.get(selected_doctor, [])
             
-            # בחירת התאריכים
             selected_dates = st.multiselect(
                 "סמני את התאריכים (אפשר לבחור כמה ביחד):", 
                 options_for_doctor,
@@ -142,7 +163,6 @@ def main():
 
     st.divider()
     
-    # שלב 2: מעקב - מי כבר הוזן?
     st.subheader("📋 סטטוס הזנות לחודש הקרוב")
     fed_doctors = list(st.session_state.availability_dict.keys())
     
@@ -156,10 +176,7 @@ def main():
         st.write("")
         if st.button("🪄 צרי סידור עבודה חודשי", type="primary", use_container_width=True):
             st.balloons()
-            st.success("נהדר! כל הנתונים נשמרו. האלגוריתם (עם 'מד הצדק' שנבנה מיד) ירוץ על התאריכים האלו! 🚀")
-            
-            # כאן נוכל להדפיס מאחורי הקלעים את המידע שהצטבר:
-            # st.write(st.session_state.availability_dict)
+            st.success("נהדר! כל הנתונים נשמרו. תשתית האלגוריתם ('מד הצדק') מוכנה לשלב הבא! 🚀")
     else:
         st.caption("עדיין לא הוזנו תאריכים לאף רופא.")
 
