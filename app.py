@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
-import random
 from datetime import datetime, timedelta
 import calendar
+import time
 
 # הגדרות עמוד נעימות
 st.set_page_config(page_title="המשמרות של מאיה", page_icon="🌸", layout="centered")
@@ -19,7 +19,7 @@ st.markdown("""
 # --- פונקציות עזר לחודשים ותאריכים ---
 def get_next_month_dates():
     today = datetime.today()
-    # חישוב החודש הבא
+    # חישוב החודש הבא (קפיצה קטנה קדימה כדי למצוא את החודש הבא בוודאות)
     next_month = today.replace(day=28) + timedelta(days=4) 
     year = next_month.year
     month = next_month.month
@@ -43,20 +43,23 @@ ALL_DATES, WEEKEND_DATES, TARGET_MONTH = get_next_month_dates()
 @st.cache_data
 def load_doctors_data():
     try:
-        # כאן המערכת תקרא את קובץ ה-CSV שתעלה
-        df = pd.read_csv("doctors.csv")
+        df = pd.read_csv("doctors_list.csv")
+        # ניקוי העמודות למקרה שיש רווחים נסתרים
+        df.columns = df.columns.str.strip()
+        
+        # ניקוי מספרי הטלפון מהגרש (') שיש בקובץ
+        if 'מספר טלפון' in df.columns:
+            df['מספר טלפון'] = df['מספר טלפון'].astype(str).str.replace("'", "").str.strip()
+            
         return df
     except FileNotFoundError:
-        # נתונים זמניים למקרה שהקובץ טרם הועלה (רק לצורך תצוגה)
-        return pd.DataFrame({
-            "שם רופא": ["בהאא עתאמנה", "מטקוביץ אליעזר", "ילנמה טראסוב", "רופא רגיל א'", "רופא רגיל ב'"],
-            "טלפון": ["0500000001", "0500000002", "0500000003", "0500000004", "0500000005"]
-        })
+        st.error("🚨 קובץ 'doctors_list.csv' לא נמצא בשרת! נא להעלות אותו לתיקייה.")
+        return pd.DataFrame(columns=["שם הרופא", "מספר טלפון"])
 
 # --- אזור ניהול ---
 @st.dialog("🔒 כניסת מנהלת")
 def admin_login():
-    st.markdown("בוקר טוב! הזיני סיסמה כדי להתחיל לעבוד.")
+    st.markdown("בוקר טוב מאיה! הזיני סיסמה כדי להתחיל לעבוד.")
     pwd = st.text_input("סיסמה", type="password")
     if st.button("התחברי 🌸", use_container_width=True):
         if pwd == "MAYA3":
@@ -69,7 +72,7 @@ def main():
     if "maya_logged_in" not in st.session_state:
         st.session_state.maya_logged_in = False
     
-    # מאגר לשמירת התאריכים שמאיה מזינה
+    # מאגר לשמירת התאריכים שמאיה מזינה (נשמר בזיכרון המקומי)
     if "availability_dict" not in st.session_state:
         st.session_state.availability_dict = {}
 
@@ -89,34 +92,42 @@ def main():
     st.divider()
 
     if not st.session_state.maya_logged_in:
-        st.info("אנא התחברי למערכת כדי להתחיל לשבץ משמרות.")
+        st.info("אנא התחברי למערכת כדי להתחיל לשבץ משמרות (סיסמה: MAYA3).")
         st.stop()
 
-    # טעינת רשימת הרופאים
+    # טעינת רשימת הרופאים מקובץ ה-CSV שהעלית
     df_doctors = load_doctors_data()
-    doctor_names = df_doctors['שם רופא'].tolist()
+    if df_doctors.empty:
+        st.stop()
+        
+    doctor_names = df_doctors['שם הרופא'].tolist()
 
     st.subheader("👩‍⚕️ הזנת זמינות רופאים")
-    st.markdown("בחרי רופא מהרשימה וסמני את התאריכים שהוא פנוי בהם.")
+    st.markdown("בחרי רופא מהרשימה וסמני את התאריכים שהוא פנוי בהם. מספרי הטלפון שמורים בבטחה במערכת ולא יוצגו כאן.")
     
-    # שלב 1: בחירת רופא (אופציה 1 - תיק אישי)
     selected_doctor = st.selectbox("בחירת רופא להזנה:", ["-- בחרי רופא --"] + doctor_names)
     
     if selected_doctor != "-- בחרי רופא --":
         with st.container(border=True):
             st.markdown(f"#### התאריכים של {selected_doctor}")
             
-            # לוגיקה חכמה: חסימת ימי חול למי שעובד רק סופ"ש
-            if selected_doctor in ["בהאא עתאמנה", "מטקוביץ אליעזר"]:
-                st.info("💡 שימי לב: רופא זה עובד רק בסופי שבוע. המערכת מציגה רק ימי שישי ושבת.")
+            # לוגיקה חכמה וגמישה: בדיקה האם חלק מהשם מכיל מילות מפתח
+            is_weekend_only = any(name in selected_doctor for name in ["בהאא", "עתאמנה", "מטקוביץ"])
+            is_bmt_only = any(name in selected_doctor for name in ["ילנה", "טראסוב", "בהאא", "עתאמנה"])
+            
+            if is_weekend_only:
+                st.info("💡 שימי לב: רופא זה עובד רק בסופי שבוע. המערכת מציגה לבחירה רק ימי שישי ושבת.")
                 options_for_doctor = WEEKEND_DATES
             else:
                 options_for_doctor = ALL_DATES
                 
-            # שליפת נתונים קיימים אם מאיה כבר הזינה בעבר
+            if is_bmt_only:
+                st.caption("*(לידיעתך: רופא זה מוגדר למחלקת השתלות מח עצם בלבד)*")
+                
+            # שליפת נתונים קיימים אם מאיה כבר הזינה בעבר במהלך הסשן
             current_selections = st.session_state.availability_dict.get(selected_doctor, [])
             
-            # בחירת התאריכים (Multi-select נוח)
+            # בחירת התאריכים
             selected_dates = st.multiselect(
                 "סמני את התאריכים (אפשר לבחור כמה ביחד):", 
                 options_for_doctor,
@@ -126,7 +137,7 @@ def main():
             if st.button(f"💾 שמרי תאריכים ל{selected_doctor}", type="primary"):
                 st.session_state.availability_dict[selected_doctor] = selected_dates
                 st.success(f"מעולה! התאריכים של {selected_doctor} נשמרו בהצלחה. ✨")
-                time.sleep(1) # השהייה קלה לחוויה חלקה
+                time.sleep(1) 
                 st.rerun()
 
     st.divider()
@@ -145,11 +156,12 @@ def main():
         st.write("")
         if st.button("🪄 צרי סידור עבודה חודשי", type="primary", use_container_width=True):
             st.balloons()
-            st.success("האלגוריתם (שנבנה בהמשך) ירוץ עכשיו על הנתונים שהזנת! 🚀")
-            # כאן יכנס בעתיד קוד השיבוץ (מד הצדק)
+            st.success("נהדר! כל הנתונים נשמרו. האלגוריתם (עם 'מד הצדק' שנבנה מיד) ירוץ על התאריכים האלו! 🚀")
+            
+            # כאן נוכל להדפיס מאחורי הקלעים את המידע שהצטבר:
+            # st.write(st.session_state.availability_dict)
     else:
         st.caption("עדיין לא הוזנו תאריכים לאף רופא.")
 
 if __name__ == "__main__":
-    import time # הוספת time להשהייה חלקה
     main()
