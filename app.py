@@ -7,6 +7,8 @@ import json
 import os
 import io
 import urllib.parse
+import streamlit.components.v1 as components
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # הגדרות עמוד נעימות
 st.set_page_config(page_title="המשמרות של מאיה", page_icon="🌸", layout="centered")
@@ -53,7 +55,7 @@ def load_draft():
                 if "availability" in data:
                     return data["availability"], data.get("sandwich_lovers", [])
                 else:
-                    return data, [] # תמיכה בטיוטה מהגרסה הקודמת
+                    return data, []
         except:
             return {}, []
     return {}, []
@@ -117,16 +119,14 @@ def generate_fair_schedule(availability_dict, sandwich_lovers):
     
     schedule = []
     bmt_keywords = ["ילנה", "טראסוב", "בהאא", "עתאמנה"]
-    unwanted_sandwiches = [] # מעקב אחרי מי שקיבל סנדוויץ' בעל כורחו
+    unwanted_sandwiches = [] 
     
-    # בדיקת חוק איסור רצף (חוק ברזל)
     def can_work(doc, date_str):
         d = datetime.strptime(date_str, "%d/%m/%Y")
         prev_d = (d - timedelta(days=1)).strftime("%d/%m/%Y")
         next_d = (d + timedelta(days=1)).strftime("%d/%m/%Y")
         return (prev_d not in assigned_dates[doc]) and (next_d not in assigned_dates[doc])
 
-    # בדיקת סנדוויץ' (הפרש של 2 או 3 ימים)
     def creates_sandwich(doc, date_str):
         if doc in sandwich_lovers:
             return False
@@ -157,13 +157,6 @@ def generate_fair_schedule(availability_dict, sandwich_lovers):
         
         bmt_doc = None
         hemato_doc = None
-        
-        # סדר העדיפויות במיון:
-        # 1. מינימום 2 משמרות
-        # 2. האם יוצר סנדוויץ'? (False קודם ל-True)
-        # 3. כמה תאריכים נתן (קמצנים קודם)
-        # 4. כמות משמרות שקיבל עד כה
-        # 5. נקודות שחיקה
         
         if bmt_only_docs:
             bmt_only_docs.sort(key=lambda d: (
@@ -216,8 +209,7 @@ def generate_fair_schedule(availability_dict, sandwich_lovers):
             "השתלות מח עצם": bmt_doc if bmt_doc else "חסר רופא 🚨"
         })
 
-    # --- שלב 2: מנגנון "רובין הוד" להשלמה ל-2 משמרות ---
-    # נריץ פעמיים: פעם ראשונה ננסה להשלים בלי לייצר סנדוויץ'. אם לא עבד, נריץ שוב ונאפשר סנדוויץ'.
+    # --- שלב 2: מנגנון "רובין הוד" ---
     for pass_num in [1, 2]:
         for doc in availability_dict.keys():
             while len(assigned_dates[doc]) < 2 and avail_counts[doc] > len(assigned_dates[doc]):
@@ -227,7 +219,7 @@ def generate_fair_schedule(availability_dict, sandwich_lovers):
                     if not can_work(doc, date_str): continue
                     
                     if pass_num == 1 and creates_sandwich(doc, date_str):
-                        continue # בסיבוב הראשון נוותר על החלפות שיוצרות סנדוויץ'
+                        continue 
                     
                     day_dict = next(item for item in schedule if item["תאריך"] == date_str)
                     curr_hemato = day_dict["המטואונקולוגיה"]
@@ -262,6 +254,121 @@ def generate_fair_schedule(availability_dict, sandwich_lovers):
 
     return pd.DataFrame(schedule), burnout_scores, list(set([doc for doc, d in unwanted_sandwiches]))
 
+# --- פונקציית עיצוב אקסל להורדה (אופציה 1) ---
+def create_styled_excel(df, month_name):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        sheet_name = 'סידור חודשי'
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+        worksheet = writer.sheets[sheet_name]
+        
+        # כיוון הגיליון לימין-שמאל (RTL)
+        worksheet.sheet_view.rightToLeft = True
+        
+        # סגנונות עיצוב
+        header_fill = PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid")
+        weekend_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+        bold_font = Font(bold=True)
+        center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), 
+                             top=Side(style='thin'), bottom=Side(style='thin'))
+        
+        # עיצוב שורת כותרת
+        for cell in worksheet[1]:
+            cell.font = bold_font
+            cell.fill = header_fill
+            cell.alignment = center_align
+            cell.border = thin_border
+            
+        # עיצוב תאים ושורות סופ"ש
+        for row in worksheet.iter_rows(min_row=2, max_col=len(df.columns), max_row=len(df)+1):
+            is_weekend = "סופ״ש" in str(row[1].value)
+            for cell in row:
+                cell.alignment = center_align
+                cell.border = thin_border
+                if is_weekend:
+                    cell.fill = weekend_fill
+                    
+        # רוחב עמודות אוטומטי
+        worksheet.column_dimensions['A'].width = 15
+        worksheet.column_dimensions['B'].width = 15
+        worksheet.column_dimensions['C'].width = 25
+        worksheet.column_dimensions['D'].width = 25
+        worksheet.column_dimensions['E'].width = 25
+        
+        # הגדרות הדפסה לאקסל: לרוחב והתאמה לעמוד אחד
+        worksheet.page_setup.orientation = worksheet.ORIENTATION_LANDSCAPE
+        worksheet.page_setup.fitToWidth = 1
+        worksheet.page_setup.fitToHeight = 1
+        
+    return output.getvalue()
+
+# --- פונקציית ייצור HTML להדפסה ישירה (אופציה 2) ---
+def get_printable_html(df, month_title):
+    html = f"""
+    <!DOCTYPE html>
+    <html dir="rtl" lang="he">
+    <head>
+        <meta charset="UTF-8">
+        <title>לוח משמרות - {month_title}</title>
+        <style>
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #fff; padding: 20px; }}
+            .print-btn {{ display: block; margin: 0 auto 20px auto; padding: 12px 24px; font-size: 16px; background-color: #2e7d32; color: white; border: none; border-radius: 8px; cursor: pointer; text-align: center; width: 200px; }}
+            .print-btn:hover {{ background-color: #1b5e20; }}
+            h2, h3 {{ text-align: center; color: #333; margin: 5px 0; }}
+            table {{ width: 100%; border-collapse: collapse; margin-top: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
+            th, td {{ border: 1px solid #ddd; padding: 12px 8px; text-align: center; }}
+            th {{ background-color: #D9EAD3; color: #2e7d32; font-weight: bold; font-size: 15px; }}
+            tr:nth-child(even) {{ background-color: #fafafa; }}
+            .weekend-row {{ background-color: #f0f0f0 !important; font-weight: bold; }}
+            .footer {{ text-align: center; margin-top: 30px; font-size: 12px; color: #777; }}
+            @media print {{
+                .print-btn {{ display: none; }}
+                body {{ padding: 0; }}
+                table {{ box-shadow: none; border: 2px solid #000; }}
+                th, td {{ border: 1px solid #000; color: #000; }}
+                th {{ background-color: #e2f0d9 !important; -webkit-print-color-adjust: exact; }}
+                .weekend-row {{ background-color: #eaeaea !important; -webkit-print-color-adjust: exact; }}
+            }}
+        </style>
+    </head>
+    <body>
+        <button class="print-btn" onclick="window.print()">🖨️ הדפס לוח משמרות</button>
+        <h2>🏥 לוח תורנויות המטואונקולוגיה והשתלות מח עצם</h2>
+        <h3>חודש: {month_title}</h3>
+        
+        <table>
+            <thead>
+                <tr>
+                    <th>תאריך</th>
+                    <th>סוג יום</th>
+                    <th>הערות</th>
+                    <th>המטואונקולוגיה</th>
+                    <th>השתלות מח עצם</th>
+                </tr>
+            </thead>
+            <tbody>
+    """
+    for _, row in df.iterrows():
+        weekend_class = "weekend-row" if "סופ״ש" in str(row['סוג יום']) else ""
+        html += f"""
+                <tr class="{weekend_class}">
+                    <td>{row['תאריך']}</td>
+                    <td>{row['סוג יום']}</td>
+                    <td>{row.get('הערות', '')}</td>
+                    <td>{row['המטואונקולוגיה']}</td>
+                    <td>{row['השתלות מח עצם']}</td>
+                </tr>
+        """
+    html += """
+            </tbody>
+        </table>
+        <div class="footer">הופק אוטומטית על ידי מערכת השיבוצים של מאיה 🌸</div>
+    </body>
+    </html>
+    """
+    return html
+
 # --- אזור ניהול ויומן שינויים ---
 @st.dialog("🔒 כניסת מנהלת")
 def admin_login():
@@ -282,20 +389,21 @@ def admin_login():
 @st.dialog("📜 יומן שינויים - היסטוריית הפיתוח")
 def show_changelog():
     st.markdown("""
+    **v3.0.0 | הדפסה מתקדמת ועיצוב 🎨**
+    * **אקסל על סטרואידים:** ייצוא קובץ אקסל מעוצב אוטומטית (RTL, כותרות צבעוניות, סימון סופ"שים, מוכן להדפסה בעמוד אחד לרוחב).
+    * **הדפסה ישירה:** הוספת תצוגת אינטרנט HTML מרהיבה עם כפתור הדפסה ישיר מתוך האפליקציה עצמה ללא צורך בהורדת אקסל.
+    
     **v2.2.0 | מלחמת הסנדוויצ'ים וטבלת סיכום 🥪**
-    * **מניעת תורנויות צפופות:** האלגוריתם מונע שיבוץ "סנדוויץ'" (הפרש של יומיים או שלושה בין משמרות) לרופא, אלא אם אין ברירה אחרת.
-    * **רשימת חריגי סנדוויץ':** הוספת אזור הגדרות שבו מאיה יכולה לסמן רופאים שמעדיפים משמרות צפופות.
-    * **התראות חכמות:** המערכת תתריע למאיה בסוף השיבוץ אם נאלצה לתת סנדוויץ' לרופא שלא ביקש.
-    * **טבלת סיכום:** הוספת טבלת תמצות קריאה וברורה המציגה במדויק כמה משמרות קיבל כל רופא.
+    * מניעת תורנויות צפופות (סנדוויץ'), רשימת חריגים, התראות חכמות, וטבלת סיכום משמרות.
 
     **v2.1.0 | חוקי ברזל ומינימום משמרות 🛡️**
-    * איסור מוחלט על יומיים ברצף, תעדוף רופאים שנתנו מעט תאריכים, ומנגנון "רובין הוד" חכם ששואב ממשמרות של רופאים טחונים כדי להשלים לכולם למינימום 2 משמרות.
+    * איסור מוחלט על יומיים ברצף, תעדוף רופאים שנתנו מעט תאריכים, מנגנון "רובין הוד" חכם למינימום 2 משמרות.
 
     **v2.0.0 | חווית משתמש ואבטחה מלאה 🚀**
-    * הורדה לאקסל, טבלת עריכה ידנית חופשית, וייצור וואטסאפים אוטומטיים לשליחה מהירה.
+    * טבלת עריכה ידנית חופשית, וייצור וואטסאפים אוטומטיים לשליחה מהירה.
 
     **v1.1.0 | טיוטות אוטומטיות ומד הצדק ⚖️**
-    * מנגנון טיוטה Auto-Save, ואלגוריתם "נקודות שחיקה" המחלק משמרות לפי עומס קודם.
+    * מנגנון טיוטה Auto-Save, ואלגוריתם "נקודות שחיקה".
     """)
     if st.button("סגירה", use_container_width=True):
         st.rerun()
@@ -343,7 +451,6 @@ def main():
     fed_doctors_count = len(st.session_state.availability_dict.keys())
     progress_val = min(fed_doctors_count / total_doctors if total_doctors > 0 else 0, 1.0)
 
-    # אזור הגדרות מתקדמות (מאשרות סנדוויץ')
     with st.expander("⚙️ הגדרות אילוצים מיוחדים"):
         selected_lovers = st.multiselect(
             "רופאים שמאשרים תורנויות צפופות (סנדוויץ'):",
@@ -427,12 +534,10 @@ def main():
         st.divider()
         st.subheader("🎉 סידור העבודה מוכן!")
         
-        # תצוגת ההתראות על סנדוויצ'ים
         if st.session_state.get("unwanted_sandwiches"):
             docs_str = ", ".join(st.session_state.unwanted_sandwiches)
             st.warning(f"⚠️ שימי לב: נאלצנו לשבץ תורנויות סנדוויץ' לרופאים הבאים כדי לעמוד באילוצים (או להגיע למינימום משמרות): {docs_str}.")
         
-        # חיתוך המשמרות וטבלת סיכום
         shifts_by_doc = {}
         for idx, row in st.session_state.final_schedule.iterrows():
             date = row['תאריך']
@@ -454,11 +559,34 @@ def main():
             st.markdown("#### 📊 סיכום כמות משמרות")
             st.dataframe(summary_df, hide_index=True, use_container_width=True)
 
-        st.markdown("אם משהו לא מסתדר לך, **את יכולה ללחוץ על השמות בטבלה ולשנות אותם ידנית** לפני שאת מורידה את הקובץ.")
+        st.markdown("אם משהו לא מסתדר לך, **את יכולה ללחוץ על השמות בטבלה ולשנות אותם ידנית** לפני שאת מדפיסה או שולחת.")
         
         edited_df = st.data_editor(st.session_state.final_schedule, use_container_width=True, hide_index=True)
         
-        # חיתוך מחדש במקרה של עריכה ידנית, כדי שהוואטסאפ יהיה מעודכן!
+        # אזור הדפסה והורדה
+        st.divider()
+        col_print, col_download = st.columns(2)
+        
+        with col_print:
+            st.subheader("🖨️ הדפסה ישירה")
+            st.markdown("להדפסת הלוח בעיצוב נקי ומוכן לתלייה במחלקה:")
+            html_content = get_printable_html(edited_df, TARGET_MONTH)
+            components.html(html_content, height=120, scrolling=False)
+            
+        with col_download:
+            st.subheader("📥 ייצוא לאקסל")
+            st.markdown("להורדת הלוח כקובץ אקסל מעוצב ומוכן להדפסה:")
+            excel_data = create_styled_excel(edited_df, TARGET_MONTH)
+            st.download_button(
+                label="📥 לחצי כאן להורדת סידור מעוצב לאקסל",
+                data=excel_data,
+                file_name=f"schedule_{TARGET_MONTH.replace('/', '_')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True
+            )
+        
+        # חיתוך מחדש במקרה של עריכה ידנית לוואטסאפ
         shifts_by_doc_edited = {}
         for idx, row in edited_df.iterrows():
             date = row['תאריך']
@@ -469,19 +597,6 @@ def main():
                 shifts_by_doc_edited.setdefault(hemato, []).append(f"• {date} (המטואונקולוגיה)")
             if bmt and "חסר רופא" not in bmt:
                 shifts_by_doc_edited.setdefault(bmt, []).append(f"• {date} (השתלות מח עצם)")
-        
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            edited_df.to_excel(writer, index=False, sheet_name='סידור חודשי')
-        
-        st.download_button(
-            label="📥 לחצי כאן להורדת הסידור המלא לאקסל",
-            data=output.getvalue(),
-            file_name=f"schedule_{TARGET_MONTH.replace('/', '_')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            use_container_width=True
-        )
         
         st.divider()
         st.subheader("📱 שליחת הודעות אישיות לרופאים")
