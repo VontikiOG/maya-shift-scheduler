@@ -22,7 +22,6 @@ st.markdown("""
 
 DRAFT_FILE = "schedule_draft.json"
 
-# רשימת חגים לדוגמה 
 HOLIDAYS = {
     "02/04/2026": "ערב פסח 🍷",
     "03/04/2026": "פסח 🍷",
@@ -35,10 +34,14 @@ HOLIDAYS = {
 }
 
 # --- פונקציות טיוטה ושמירת מצב ---
-def save_draft(data):
+def save_draft(data, sandwich_lovers=[]):
     try:
+        draft_data = {
+            "availability": data,
+            "sandwich_lovers": sandwich_lovers
+        }
         with open(DRAFT_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
+            json.dump(draft_data, f, ensure_ascii=False, indent=4)
     except Exception as e:
         st.error(f"שגיאה בשמירת הטיוטה: {e}")
 
@@ -46,10 +49,14 @@ def load_draft():
     if os.path.exists(DRAFT_FILE):
         try:
             with open(DRAFT_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+                if "availability" in data:
+                    return data["availability"], data.get("sandwich_lovers", [])
+                else:
+                    return data, [] # תמיכה בטיוטה מהגרסה הקודמת
         except:
-            return {}
-    return {}
+            return {}, []
+    return {}, []
 
 # --- פונקציות עזר לחודשים ותאריכים ---
 def get_next_month_dates():
@@ -79,7 +86,7 @@ def is_weekend(date_str):
     except:
         return False
 
-# --- טעינת נתוני הרופאים מ-CSV והכנת מספרי טלפון ---
+# --- טעינת נתוני הרופאים ---
 @st.cache_data
 def load_doctors_data():
     for enc in ['utf-8', 'cp1255', 'iso-8859-8']:
@@ -96,8 +103,8 @@ def load_doctors_data():
             return pd.DataFrame(columns=["שם הרופא", "מספר טלפון", "טלפון_נקי"])
     return pd.DataFrame(columns=["שם הרופא", "מספר טלפון", "טלפון_נקי"])
 
-# --- אלגוריתם "מד הצדק" המשודרג (v2.1) ---
-def generate_fair_schedule(availability_dict):
+# --- אלגוריתם "מד הצדק" המשודרג (v2.2) ---
+def generate_fair_schedule(availability_dict, sandwich_lovers):
     all_dates = set()
     for dates in availability_dict.values():
         all_dates.update(dates)
@@ -105,27 +112,36 @@ def generate_fair_schedule(availability_dict):
     sorted_dates = sorted(list(all_dates), key=lambda x: datetime.strptime(x, "%d/%m/%Y"))
     burnout_scores = {doc: 0 for doc in availability_dict.keys()}
     
-    # מעקב מדויק אחרי מי עובד מתי
     assigned_dates = {doc: set() for doc in availability_dict.keys()}
-    # כמה תאריכים כל רופא נתן למאיה
     avail_counts = {doc: len(dates) for doc, dates in availability_dict.items()}
     
     schedule = []
     bmt_keywords = ["ילנה", "טראסוב", "בהאא", "עתאמנה"]
+    unwanted_sandwiches = [] # מעקב אחרי מי שקיבל סנדוויץ' בעל כורחו
     
-    # פונקציית בדיקת רצף (חוק ברזל: לא עובדים יומיים ברצף)
+    # בדיקת חוק איסור רצף (חוק ברזל)
     def can_work(doc, date_str):
         d = datetime.strptime(date_str, "%d/%m/%Y")
         prev_d = (d - timedelta(days=1)).strftime("%d/%m/%Y")
         next_d = (d + timedelta(days=1)).strftime("%d/%m/%Y")
         return (prev_d not in assigned_dates[doc]) and (next_d not in assigned_dates[doc])
 
+    # בדיקת סנדוויץ' (הפרש של 2 או 3 ימים)
+    def creates_sandwich(doc, date_str):
+        if doc in sandwich_lovers:
+            return False
+        d = datetime.strptime(date_str, "%d/%m/%Y")
+        for delta in [-3, -2, 2, 3]:
+            check_date = (d + timedelta(days=delta)).strftime("%d/%m/%Y")
+            if check_date in assigned_dates[doc]:
+                return True
+        return False
+
     # --- שלב 1: שיבוץ ראשוני ---
     for date_str in sorted_dates:
         is_we = is_weekend(date_str)
         holiday_note = HOLIDAYS.get(date_str, "")
         
-        # מסננים רק את מי שפנוי היום *וגם* לא עבד אתמול/מחר
         valid_docs = [doc for doc, dates in availability_dict.items() if date_str in dates and can_work(doc, date_str)]
         
         if not valid_docs:
@@ -143,14 +159,16 @@ def generate_fair_schedule(availability_dict):
         hemato_doc = None
         
         # סדר העדיפויות במיון:
-        # 1. חובה לדאוג למי שאין לו עדיין 2 משמרות.
-        # 2. קדימות למי שנתן הכי מעט תאריכים פנויים החודש (הקמצנים קודם!).
-        # 3. קדימות למי שיש לו פחות משמרות כרגע.
-        # 4. שחיקה - המטו מעלים עומס, השתלות מורידים (פרס).
+        # 1. מינימום 2 משמרות
+        # 2. האם יוצר סנדוויץ'? (False קודם ל-True)
+        # 3. כמה תאריכים נתן (קמצנים קודם)
+        # 4. כמות משמרות שקיבל עד כה
+        # 5. נקודות שחיקה
         
         if bmt_only_docs:
             bmt_only_docs.sort(key=lambda d: (
                 len(assigned_dates[d]) >= 2,
+                creates_sandwich(d, date_str),
                 avail_counts[d],
                 len(assigned_dates[d]),
                 burnout_scores[d]
@@ -160,6 +178,7 @@ def generate_fair_schedule(availability_dict):
         if regular_docs:
             regular_docs.sort(key=lambda d: (
                 len(assigned_dates[d]) >= 2,
+                creates_sandwich(d, date_str),
                 avail_counts[d],
                 len(assigned_dates[d]),
                 burnout_scores[d]
@@ -170,16 +189,22 @@ def generate_fair_schedule(availability_dict):
         if not bmt_doc and regular_docs:
             regular_docs.sort(key=lambda d: (
                 len(assigned_dates[d]) >= 2,
+                creates_sandwich(d, date_str),
                 avail_counts[d],
                 len(assigned_dates[d]),
-                -burnout_scores[d] # מינוס = לקחת את מי שנטחן הכי הרבה בהמטו
+                -burnout_scores[d]
             ))
             bmt_doc = regular_docs[0]
             
         if bmt_doc:
+            if creates_sandwich(bmt_doc, date_str) and bmt_doc not in sandwich_lovers:
+                unwanted_sandwiches.append((bmt_doc, date_str))
             burnout_scores[bmt_doc] += 1
             assigned_dates[bmt_doc].add(date_str)
+            
         if hemato_doc:
+            if creates_sandwich(hemato_doc, date_str) and hemato_doc not in sandwich_lovers:
+                unwanted_sandwiches.append((hemato_doc, date_str))
             burnout_scores[hemato_doc] += 2
             assigned_dates[hemato_doc].add(date_str)
             
@@ -191,46 +216,51 @@ def generate_fair_schedule(availability_dict):
             "השתלות מח עצם": bmt_doc if bmt_doc else "חסר רופא 🚨"
         })
 
-    # --- שלב 2: מנגנון "רובין הוד" לתיקון מינימום 2 משמרות ---
-    for doc in availability_dict.keys():
-        # כל עוד לרופא יש פחות מ-2 משמרות, ויש לו עוד תאריכים פנויים שהוא לא עובד בהם:
-        while len(assigned_dates[doc]) < 2 and avail_counts[doc] > len(assigned_dates[doc]):
-            swapped = False
-            for date_str in availability_dict[doc]:
-                if date_str in assigned_dates[doc]: continue
-                if not can_work(doc, date_str): continue # אסור ליצור לו רצף
-                
-                # מציאת היום הספציפי בטבלה
-                day_dict = next(item for item in schedule if item["תאריך"] == date_str)
-                curr_hemato = day_dict["המטואונקולוגיה"]
-                curr_bmt = day_dict["השתלות מח עצם"]
-                
-                is_bmt_only_doc = any(k in doc for k in bmt_keywords)
-                
-                # מנסים לקחת משמרת המטו ממישהו שיש לו 3 משמרות ומעלה
-                if not is_bmt_only_doc and curr_hemato != "חסר רופא 🚨" and len(assigned_dates.get(curr_hemato, [])) > 2:
-                    day_dict["המטואונקולוגיה"] = doc
-                    assigned_dates[curr_hemato].remove(date_str)
-                    burnout_scores[curr_hemato] -= 2
-                    assigned_dates[doc].add(date_str)
-                    burnout_scores[doc] += 2
-                    swapped = True
-                    break
+    # --- שלב 2: מנגנון "רובין הוד" להשלמה ל-2 משמרות ---
+    # נריץ פעמיים: פעם ראשונה ננסה להשלים בלי לייצר סנדוויץ'. אם לא עבד, נריץ שוב ונאפשר סנדוויץ'.
+    for pass_num in [1, 2]:
+        for doc in availability_dict.keys():
+            while len(assigned_dates[doc]) < 2 and avail_counts[doc] > len(assigned_dates[doc]):
+                swapped = False
+                for date_str in availability_dict[doc]:
+                    if date_str in assigned_dates[doc]: continue
+                    if not can_work(doc, date_str): continue
                     
-                # מנסים לקחת משמרת השתלות ממישהו שיש לו 3 משמרות ומעלה
-                if curr_bmt != "חסר רופא 🚨" and len(assigned_dates.get(curr_bmt, [])) > 2:
-                    day_dict["השתלות מח עצם"] = doc
-                    assigned_dates[curr_bmt].remove(date_str)
-                    burnout_scores[curr_bmt] -= 1
-                    assigned_dates[doc].add(date_str)
-                    burnout_scores[doc] += 1
-                    swapped = True
-                    break
+                    if pass_num == 1 and creates_sandwich(doc, date_str):
+                        continue # בסיבוב הראשון נוותר על החלפות שיוצרות סנדוויץ'
                     
-            if not swapped:
-                break # אם עברנו על כל התאריכים ואי אפשר להחליף, עוצרים.
+                    day_dict = next(item for item in schedule if item["תאריך"] == date_str)
+                    curr_hemato = day_dict["המטואונקולוגיה"]
+                    curr_bmt = day_dict["השתלות מח עצם"]
+                    
+                    is_bmt_only_doc = any(k in doc for k in bmt_keywords)
+                    
+                    if not is_bmt_only_doc and curr_hemato != "חסר רופא 🚨" and len(assigned_dates.get(curr_hemato, [])) > 2:
+                        day_dict["המטואונקולוגיה"] = doc
+                        assigned_dates[curr_hemato].remove(date_str)
+                        burnout_scores[curr_hemato] -= 2
+                        assigned_dates[doc].add(date_str)
+                        burnout_scores[doc] += 2
+                        if creates_sandwich(doc, date_str) and doc not in sandwich_lovers:
+                            unwanted_sandwiches.append((doc, date_str))
+                        swapped = True
+                        break
+                        
+                    if curr_bmt != "חסר רופא 🚨" and len(assigned_dates.get(curr_bmt, [])) > 2:
+                        day_dict["השתלות מח עצם"] = doc
+                        assigned_dates[curr_bmt].remove(date_str)
+                        burnout_scores[curr_bmt] -= 1
+                        assigned_dates[doc].add(date_str)
+                        burnout_scores[doc] += 1
+                        if creates_sandwich(doc, date_str) and doc not in sandwich_lovers:
+                            unwanted_sandwiches.append((doc, date_str))
+                        swapped = True
+                        break
+                        
+                if not swapped:
+                    break
 
-    return pd.DataFrame(schedule), burnout_scores
+    return pd.DataFrame(schedule), burnout_scores, list(set([doc for doc, d in unwanted_sandwiches]))
 
 # --- אזור ניהול ויומן שינויים ---
 @st.dialog("🔒 כניסת מנהלת")
@@ -252,19 +282,20 @@ def admin_login():
 @st.dialog("📜 יומן שינויים - היסטוריית הפיתוח")
 def show_changelog():
     st.markdown("""
+    **v2.2.0 | מלחמת הסנדוויצ'ים וטבלת סיכום 🥪**
+    * **מניעת תורנויות צפופות:** האלגוריתם מונע שיבוץ "סנדוויץ'" (הפרש של יומיים או שלושה בין משמרות) לרופא, אלא אם אין ברירה אחרת.
+    * **רשימת חריגי סנדוויץ':** הוספת אזור הגדרות שבו מאיה יכולה לסמן רופאים שמעדיפים משמרות צפופות.
+    * **התראות חכמות:** המערכת תתריע למאיה בסוף השיבוץ אם נאלצה לתת סנדוויץ' לרופא שלא ביקש.
+    * **טבלת סיכום:** הוספת טבלת תמצות קריאה וברורה המציגה במדויק כמה משמרות קיבל כל רופא.
+
     **v2.1.0 | חוקי ברזל ומינימום משמרות 🛡️**
-    * **איסור רצף (No Consecutive Shifts):** האלגוריתם מונע לחלוטין מצב שבו רופא (רגיל או חריג) עובד יומיים ברצף.
-    * **תעדוף "הקמצנים":** שיבוץ המשמרות מתחיל מהרופאים שנתנו הכי מעט תאריכים, כדי להבטיח שהם ישובצו ולא יפוספסו.
-    * **הבטחת מינימום 2 משמרות:** הוספת מנגנון "רובין הוד" חכם בסוף השיבוץ - אם מישהו קיבל רק משמרת אחת (אבל פנוי לעוד), המערכת תשאב משמרת ממישהו שעובד 3+ משמרות ותעביר אליו.
+    * איסור מוחלט על יומיים ברצף, תעדוף רופאים שנתנו מעט תאריכים, ומנגנון "רובין הוד" חכם ששואב ממשמרות של רופאים טחונים כדי להשלים לכולם למינימום 2 משמרות.
 
     **v2.0.0 | חווית משתמש ואבטחה מלאה 🚀**
-    * הורדה לאקסל, טבלת עריכה חופשית ידנית, ייצור וואטסאפים אוטומטיים לשליחה מהירה, והעברת הסיסמה למנגנון Secrets.
+    * הורדה לאקסל, טבלת עריכה ידנית חופשית, וייצור וואטסאפים אוטומטיים לשליחה מהירה.
 
     **v1.1.0 | טיוטות אוטומטיות ומד הצדק ⚖️**
-    * מנגנון טיוטה Auto-Save, ואלגוריתם "נקודות שחיקה" המחלק משמרות לפי עומס קודם ותעדוף מחלקות.
-
-    **v1.0.0 | גרסת הבסיס למאיה 🌸**
-    * ממשק נקי, קריאת CSV עמידה לשגיאות קידוד, וזיהוי חריגי סופ"ש באופן אוטומטי.
+    * מנגנון טיוטה Auto-Save, ואלגוריתם "נקודות שחיקה" המחלק משמרות לפי עומס קודם.
     """)
     if st.button("סגירה", use_container_width=True):
         st.rerun()
@@ -274,7 +305,9 @@ def main():
         st.session_state.maya_logged_in = False
     
     if "availability_dict" not in st.session_state:
-        st.session_state.availability_dict = load_draft()
+        avail, lovers = load_draft()
+        st.session_state.availability_dict = avail
+        st.session_state.sandwich_lovers = lovers
 
     col1, col2, col3 = st.columns([3, 1, 1])
     with col1:
@@ -309,6 +342,17 @@ def main():
     total_doctors = len(doctor_names)
     fed_doctors_count = len(st.session_state.availability_dict.keys())
     progress_val = min(fed_doctors_count / total_doctors if total_doctors > 0 else 0, 1.0)
+
+    # אזור הגדרות מתקדמות (מאשרות סנדוויץ')
+    with st.expander("⚙️ הגדרות אילוצים מיוחדים"):
+        selected_lovers = st.multiselect(
+            "רופאים שמאשרים תורנויות צפופות (סנדוויץ'):",
+            doctor_names,
+            default=st.session_state.get("sandwich_lovers", [])
+        )
+        if selected_lovers != st.session_state.get("sandwich_lovers", []):
+            st.session_state.sandwich_lovers = selected_lovers
+            save_draft(st.session_state.availability_dict, st.session_state.sandwich_lovers)
 
     st.subheader("👩‍⚕️ הזנת זמינות רופאים")
     st.progress(progress_val, text=f"הוזנו {fed_doctors_count} מתוך {total_doctors} רופאים בקובץ")
@@ -349,7 +393,7 @@ def main():
                 elif selected_doctor in st.session_state.availability_dict:
                     del st.session_state.availability_dict[selected_doctor]
                 
-                save_draft(st.session_state.availability_dict)
+                save_draft(st.session_state.availability_dict, st.session_state.sandwich_lovers)
                 st.success(f"מעולה! התאריכים של {selected_doctor} נשמרו. ✨")
                 time.sleep(1) 
                 st.rerun()
@@ -368,19 +412,63 @@ def main():
         st.write("")
         if st.button("🪄 צרי סידור עבודה אוטומטי (לפי מד הצדק)", type="primary", use_container_width=True):
             with st.spinner("האלגוריתם מחשב את השיבוץ ההוגן ביותר... ⚖️"):
-                schedule_df, burnout_dict = generate_fair_schedule(st.session_state.availability_dict)
+                schedule_df, burnout_dict, unwanted_sws = generate_fair_schedule(
+                    st.session_state.availability_dict, 
+                    st.session_state.sandwich_lovers
+                )
                 st.session_state.final_schedule = schedule_df
                 st.session_state.burnout_scores = burnout_dict
+                st.session_state.unwanted_sandwiches = unwanted_sws
                 st.rerun()
     else:
         st.caption("עדיין לא הוזנו תאריכים לאף רופא.")
 
     if "final_schedule" in st.session_state:
         st.divider()
-        st.subheader("🎉 סידור העבודה מוכן! (טבלה ניתנת לעריכה)")
+        st.subheader("🎉 סידור העבודה מוכן!")
+        
+        # תצוגת ההתראות על סנדוויצ'ים
+        if st.session_state.get("unwanted_sandwiches"):
+            docs_str = ", ".join(st.session_state.unwanted_sandwiches)
+            st.warning(f"⚠️ שימי לב: נאלצנו לשבץ תורנויות סנדוויץ' לרופאים הבאים כדי לעמוד באילוצים (או להגיע למינימום משמרות): {docs_str}.")
+        
+        # חיתוך המשמרות וטבלת סיכום
+        shifts_by_doc = {}
+        for idx, row in st.session_state.final_schedule.iterrows():
+            date = row['תאריך']
+            hemato = row['המטואונקולוגיה']
+            bmt = row['השתלות מח עצם']
+            
+            if hemato and "חסר רופא" not in hemato:
+                shifts_by_doc.setdefault(hemato, []).append(f"• {date} (המטואונקולוגיה)")
+            if bmt and "חסר רופא" not in bmt:
+                shifts_by_doc.setdefault(bmt, []).append(f"• {date} (השתלות מח עצם)")
+
+        summary_data = []
+        for doc in fed_doctors:
+            summary_data.append({"שם הרופא": doc, "משמרות בפועל": len(shifts_by_doc.get(doc, []))})
+        
+        summary_df = pd.DataFrame(summary_data).sort_values(by="משמרות בפועל", ascending=False)
+        
+        with st.container(border=True):
+            st.markdown("#### 📊 סיכום כמות משמרות")
+            st.dataframe(summary_df, hide_index=True, use_container_width=True)
+
         st.markdown("אם משהו לא מסתדר לך, **את יכולה ללחוץ על השמות בטבלה ולשנות אותם ידנית** לפני שאת מורידה את הקובץ.")
         
         edited_df = st.data_editor(st.session_state.final_schedule, use_container_width=True, hide_index=True)
+        
+        # חיתוך מחדש במקרה של עריכה ידנית, כדי שהוואטסאפ יהיה מעודכן!
+        shifts_by_doc_edited = {}
+        for idx, row in edited_df.iterrows():
+            date = row['תאריך']
+            hemato = row['המטואונקולוגיה']
+            bmt = row['השתלות מח עצם']
+            
+            if hemato and "חסר רופא" not in hemato:
+                shifts_by_doc_edited.setdefault(hemato, []).append(f"• {date} (המטואונקולוגיה)")
+            if bmt and "חסר רופא" not in bmt:
+                shifts_by_doc_edited.setdefault(bmt, []).append(f"• {date} (השתלות מח עצם)")
         
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -399,22 +487,11 @@ def main():
         st.subheader("📱 שליחת הודעות אישיות לרופאים")
         st.markdown("המערכת הכינה הודעות מרוכזות לכל רופא עם המשמרות שלו:")
         
-        shifts_by_doc = {}
-        for idx, row in edited_df.iterrows():
-            date = row['תאריך']
-            hemato = row['המטואונקולוגיה']
-            bmt = row['השתלות מח עצם']
-            
-            if hemato and "חסר רופא" not in hemato:
-                shifts_by_doc.setdefault(hemato, []).append(f"• {date} (המטואונקולוגיה)")
-            if bmt and "חסר רופא" not in bmt:
-                shifts_by_doc.setdefault(bmt, []).append(f"• {date} (השתלות מח עצם)")
-                
         phone_dict = dict(zip(df_doctors['שם הרופא'], df_doctors['טלפון_נקי']))
         
-        if shifts_by_doc:
+        if shifts_by_doc_edited:
             with st.expander("רשימת הודעות מוכנות לשליחה (לחצי לפתיחה)"):
-                for doc, shifts in shifts_by_doc.items():
+                for doc, shifts in shifts_by_doc_edited.items():
                     phone = phone_dict.get(doc, "")
                     if phone:
                         msg = f"היי ד״ר {doc}, להלן המשמרות שלך לחודש הקרוב:\n" + "\n".join(shifts) + "\n\nתודה רבה, מאיה 🌸"
@@ -423,22 +500,13 @@ def main():
                     else:
                         st.warning(f"אין מספר טלפון מעודכן לד״ר {doc}")
                         
-        with st.expander("📊 מאחורי הקלעים: טבלת נקודות השחיקה ומשמרות ששובצו"):
-            st.markdown("*(המטו = +2 נקודות, השתלות = +1 נקודה. המערכת דאגה למינימום 2 משמרות היכן שניתן)*")
-            burnout_data = []
-            for doc, score in st.session_state.burnout_scores.items():
-                shifts_count = len(shifts_by_doc.get(doc, []))
-                burnout_data.append({"שם הרופא": doc, "כמות משמרות": shifts_count, "נקודות שחיקה": score})
-            
-            burnout_df = pd.DataFrame(burnout_data).sort_values(by="נקודות שחיקה", ascending=False)
-            st.dataframe(burnout_df, hide_index=True)
-
     st.write("")
     st.write("")
     with st.expander("⚙️ אפשרויות מתקדמות (איפוס המערכת)"):
         st.warning("לחיצה על הכפתור תמחק את כל התאריכים שהזנת עד כה גם מהגיבוי. הפעולה בלתי הפיכה.")
         if st.button("🗑️ נקי הכל והתחילי מחדש", type="primary"):
             st.session_state.availability_dict = {}
+            st.session_state.sandwich_lovers = []
             if "final_schedule" in st.session_state:
                 del st.session_state.final_schedule
             if os.path.exists(DRAFT_FILE):
